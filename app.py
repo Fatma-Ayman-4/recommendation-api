@@ -172,3 +172,78 @@ def recommend(product_id, item_sim_df, model, user_item,
     # Get top K
     top_idx = np.argsort(scores)[::-1][:top_k]
 
+    results = []
+    for i in top_idx:
+        item_id = candidates[i]
+        name = df[df['product_id'] == item_id]['product_name'].iloc[0]
+
+        results.append({
+            "product_id": item_id,
+            "product_name": name,
+            "score": float(scores[i])
+        })
+
+    return results
+
+
+# =============================================
+# Global Variables - Load once when app starts
+# =============================================
+print("🚀 Initializing Recommendation System...")
+
+df = load_data()
+user_item, user_item_sparse = build_user_item_matrix(df)
+item_sim_df = compute_item_similarity(user_item_sparse, user_item.columns)
+
+features_df, product_popularity, product_avg_price = prepare_features(df, user_item)
+model = train_model(features_df)
+
+print("✅ Model Ready - System Initialized Successfully!")
+
+
+# =============================================
+# Flask API
+# =============================================
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return jsonify({"message": "Recommendation API is running 🚀"})
+
+@app.route("/recommend", methods=["POST"])
+def recommend_endpoint():
+    try:
+        data = request.get_json()
+
+        if not data:
+            return jsonify({"error": "No JSON data provided"}), 400
+
+        product_id = data.get("product_id")
+        order_id = data.get("order_id")
+        top_k = data.get("top_k", 5)
+
+        if not product_id:
+            return jsonify({"error": "product_id is required"}), 400
+
+        results = recommend(
+            product_id=product_id,
+            item_sim_df=item_sim_df,
+            model=model,
+            user_item=user_item,
+            product_popularity=product_popularity,
+            product_avg_price=product_avg_price,
+            df=df,
+            order_id=order_id,
+            top_k=top_k
+        )
+
+        return jsonify(results)
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# Run the app
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False)
