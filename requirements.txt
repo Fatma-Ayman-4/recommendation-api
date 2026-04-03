@@ -6,3 +6,4 @@ xgboost
 flask
 openpyxl
 gunicorn
+joblib
