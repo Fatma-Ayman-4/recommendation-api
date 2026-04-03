@@ -7,72 +7,63 @@ from sklearn.model_selection import train_test_split
 import warnings
 import os
 import joblib
+from flask import Flask, jsonify, request
 
 warnings.filterwarnings('ignore')
 
 # =============================================
-# Global Paths
+# Global Variables & Model Saving Paths
 # =============================================
-MODEL_PATH = "recommendation_model.pkl"
+MODEL_PATH = "xgboost_ranker_model.pkl"
 SIMILARITY_PATH = "item_sim_df.pkl"
 POPULARITY_PATH = "product_popularity.pkl"
 AVG_PRICE_PATH = "product_avg_price.pkl"
+USER_ITEM_PATH = "user_item.pkl"
 
 # =============================================
 # 1. Load Data
 # =============================================
-def load_data():
-    try:
-        base_path = os.path.dirname(__file__)
-    except NameError:
-        base_path = os.getcwd()
+print("🚀 Loading data...")
+file_path = "data.xlsx"
+df = pd.read_excel(file_path, sheet_name='Sheet1')
+df['order_id'] = df['order_id'].astype(int)
+df['product_id'] = df['product_id'].astype(str)
+df['interaction'] = df['quantity']
 
-    file_path = os.path.join(base_path, "data.xlsx")
-
-    if not os.path.exists(file_path):
-        raise FileNotFoundError(f"ملف data.xlsx مش موجود في المسار: {file_path}")
-
-    df = pd.read_excel(file_path, sheet_name='Sheet1')
-    df['order_id'] = df['order_id'].astype(int)
-    df['product_id'] = df['product_id'].astype(str)
-    df['interaction'] = df['quantity']
-
-    return df
-
+print(f"Data loaded successfully! Shape: {df.shape}")
 
 # =============================================
 # 2. Build User-Item Matrix
 # =============================================
-def build_user_item_matrix(df):
-    user_item = df.pivot_table(
-        index='order_id',
-        columns='product_id',
-        values='interaction',
-        fill_value=0
-    )
-    user_item_sparse = csr_matrix(user_item.values)
-    return user_item, user_item_sparse
+user_item = df.pivot_table(
+    index='order_id',
+    columns='product_id',
+    values='interaction',
+    fill_value=0
+)
+user_item_sparse = csr_matrix(user_item.values)
 
+print(f"User-Item Matrix Ready: {user_item.shape}")
 
 # =============================================
 # 3. Item Similarity
 # =============================================
-def compute_item_similarity(user_item_sparse, columns):
-    similarity = cosine_similarity(user_item_sparse.T)
-    return pd.DataFrame(similarity, index=columns, columns=columns)
-
+item_sim_df = pd.DataFrame(
+    cosine_similarity(user_item_sparse.T),
+    index=user_item.columns,
+    columns=user_item.columns
+)
 
 # =============================================
-# 4. Prepare Features (قللنا الـ negative samples عشان يبقى أسرع)
+# 4. Features for Ranking
 # =============================================
-def prepare_features(df, user_item):
-    product_popularity = user_item.sum(axis=0)
-    product_avg_price = df.groupby('product_id')['price_egp'].mean()
+product_popularity = user_item.sum(axis=0)
+product_avg_price = df.groupby('product_id')['price_egp'].mean()
 
+def create_rank_features(df, user_item_matrix):
     data = []
-    for order_id in user_item.index:
-        row_data = user_item.loc[order_id]
-        bought_items = row_data[row_data > 0].index
+    for order_id in user_item_matrix.index:
+        bought_items = user_item_matrix.loc[order_id][user_item_matrix.loc[order_id] > 0].index
 
         # Positive samples
         for item in bought_items:
@@ -82,13 +73,12 @@ def prepare_features(df, user_item):
                 'label': 1,
                 'popularity': product_popularity[item],
                 'avg_price': product_avg_price[item],
-                'user_activity': row_data.sum()
+                'user_activity': user_item_matrix.loc[order_id].sum()
             })
 
-        # Negative samples - قللناها من 5x إلى 2x عشان السرعة
-        not_bought = row_data[row_data == 0].index
+        # Negative samples (قللنا لـ 2x عشان السرعة)
+        not_bought = user_item_matrix.loc[order_id][user_item_matrix.loc[order_id] == 0].index
         sample_size = min(2 * len(bought_items), len(not_bought))
-
         if sample_size > 0:
             sampled = np.random.choice(not_bought, size=sample_size, replace=False)
             for item in sampled:
@@ -98,25 +88,31 @@ def prepare_features(df, user_item):
                     'label': 0,
                     'popularity': product_popularity[item],
                     'avg_price': product_avg_price[item],
-                    'user_activity': row_data.sum()
+                    'user_activity': user_item_matrix.loc[order_id].sum()
                 })
 
-    return pd.DataFrame(data), product_popularity, product_avg_price
-
+    return pd.DataFrame(data)
 
 # =============================================
-# 5. Train Model
+# Load or Train Model (مهم جداً)
 # =============================================
-def train_model(features_df):
+if (os.path.exists(MODEL_PATH) and os.path.exists(SIMILARITY_PATH)):
+    print("✅ Loading pre-trained model...")
+    model = joblib.load(MODEL_PATH)
+    item_sim_df = joblib.load(SIMILARITY_PATH)
+    product_popularity = joblib.load(POPULARITY_PATH)
+    product_avg_price = joblib.load(AVG_PRICE_PATH)
+    user_item = joblib.load(USER_ITEM_PATH)
+else:
+    print("⚠️ Training model for the first time (this may take some time)...")
+    features_df = create_rank_features(df, user_item)
+    
     X = features_df.drop(['order_id', 'item_id', 'label'], axis=1)
     y = features_df['label']
 
-    train_orders, test_orders = train_test_split(
-        features_df['order_id'].unique(), test_size=0.2, random_state=42
-    )
-
-    train_mask = features_df['order_id'].isin(train_orders)
-    test_mask = features_df['order_id'].isin(test_orders)
+    train_idx, test_idx = train_test_split(features_df['order_id'].unique(), test_size=0.2, random_state=42)
+    train_mask = features_df['order_id'].isin(train_idx)
+    test_mask = features_df['order_id'].isin(test_idx)
 
     X_train, y_train = X[train_mask], y[train_mask]
     X_test, y_test = X[test_mask], y[test_mask]
@@ -126,13 +122,13 @@ def train_model(features_df):
 
     model = xgb.XGBRanker(
         objective='rank:pairwise',
+        random_state=42,
         learning_rate=0.1,
         n_estimators=200,
         max_depth=4,
         subsample=0.8,
         colsample_bytree=0.8,
-        eval_metric='ndcg',
-        random_state=42
+        eval_metric='ndcg'
     )
 
     model.fit(
@@ -140,96 +136,67 @@ def train_model(features_df):
         group=groups_train,
         eval_set=[(X_test, y_test)],
         eval_group=[groups_test],
-        verbose=False
+        verbose=True
     )
-    return model
 
-
-# =============================================
-# 6. Recommendation Function (محسنة وأسرع)
-# =============================================
-def recommend(product_id, item_sim_df, model, user_item,
-              product_popularity, product_avg_price, df,
-              order_id=None, top_k=5):
-
-    if product_id not in item_sim_df.index:
-        return [{"error": "Product not found"}]
-
-    # خد أول 80 منتج مشابه فقط (مش كلهم) عشان السرعة
-    sim_scores = item_sim_df[product_id].sort_values(ascending=False)[1:81]
-    candidates = sim_scores.index.tolist()
-
-    rows = []
-    default_user_activity = user_item.sum(axis=1).mean() if not user_item.empty else 0
-
-    for item in candidates:
-        user_activity = user_item.loc[order_id].sum() if order_id and order_id in user_item.index else default_user_activity
-        rows.append({
-            'popularity': float(product_popularity.get(item, 0)),
-            'avg_price': float(product_avg_price.get(item, 0)),
-            'user_activity': float(user_activity)
-        })
-
-    X = pd.DataFrame(rows)
-    scores = model.predict(X)
-
-    # Get top K
-    top_idx = np.argsort(scores)[::-1][:top_k]
-    results = []
-
-    for i in top_idx:
-        item_id = candidates[i]
-        name_row = df[df['product_id'] == item_id]
-        name = name_row['product_name'].iloc[0] if not name_row.empty else "Unknown"
-        results.append({
-            "product_id": item_id,
-            "product_name": name,
-            "score": float(scores[i])
-        })
-
-    return results
-
-
-# =============================================
-# Load or Train Model (الجزء المهم جداً)
-# =============================================
-print("  Initializing Recommendation System...")
-
-df = load_data()
-user_item, user_item_sparse = build_user_item_matrix(df)
-item_sim_df = compute_item_similarity(user_item_sparse, user_item.columns)
-
-# تحميل الموديل المحفوظ إذا كان موجود
-if (os.path.exists(MODEL_PATH) and 
-    os.path.exists(SIMILARITY_PATH) and 
-    os.path.exists(POPULARITY_PATH) and 
-    os.path.exists(AVG_PRICE_PATH)):
-    
-    print(" Loading pre-trained model...")
-    model = joblib.load(MODEL_PATH)
-    item_sim_df = joblib.load(SIMILARITY_PATH)
-    product_popularity = joblib.load(POPULARITY_PATH)
-    product_avg_price = joblib.load(AVG_PRICE_PATH)
-    
-else:
-    print("⚠️ Training model for the first time (this may take a few minutes)...")
-    features_df, product_popularity, product_avg_price = prepare_features(df, user_item)
-    model = train_model(features_df)
-    
-    # حفظ الموديل عشان المرات الجاية تكون أسرع
+    # حفظ كل حاجة
     joblib.dump(model, MODEL_PATH)
     joblib.dump(item_sim_df, SIMILARITY_PATH)
     joblib.dump(product_popularity, POPULARITY_PATH)
     joblib.dump(product_avg_price, AVG_PRICE_PATH)
-    print(" Model trained and saved successfully!")
+    joblib.dump(user_item, USER_ITEM_PATH)
+    print("✅ Model trained and saved!")
 
-print(" System Initialized Successfully!")
+print("✅ System Initialized Successfully!")
+
+# =============================================
+# Recommendation Function (من كودك)
+# =============================================
+def recommend_similar_products(product_id, order_id=None, top_k=5, min_similarity=0.02):
+    if product_id not in item_sim_df.index:
+        return [{"error": f"Product {product_id} not found in data"}]
+
+    sim_scores = item_sim_df[product_id].sort_values(ascending=False)
+    sim_scores = sim_scores[sim_scores.index != product_id]
+    sim_scores = sim_scores[sim_scores >= min_similarity]
+
+    if sim_scores.empty:
+        return [{"message": "No sufficiently similar products were found."}]
+
+    candidate_items = sim_scores.index.tolist()
+
+    feature_rows = []
+    for item in candidate_items:
+        user_activity = user_item.loc[order_id].sum() if order_id and order_id in user_item.index else user_item.sum(axis=1).mean()
+        feature_rows.append({
+            'popularity': product_popularity[item],
+            'avg_price': product_avg_price[item],
+            'user_activity': user_activity
+        })
+
+    X_candidates = pd.DataFrame(feature_rows)
+    scores = model.predict(X_candidates)
+
+    ranked_idx = np.argsort(scores)[::-1][:top_k]
+    result = []
+
+    for idx in ranked_idx:
+        item_id = candidate_items[idx]
+        score = scores[idx]
+        name_row = df[df['product_id'] == item_id]['product_name']
+        product_name = name_row.iloc[0] if not name_row.empty else "Name not available"
+
+        result.append({
+            "product_id": item_id,
+            "product_name": product_name,
+            "ranking_score": round(float(score), 4)
+        })
+
+    return result
 
 # =============================================
 # Flask API
 # =============================================
-from flask import Flask, jsonify, request
-
 app = Flask(__name__)
 
 @app.route("/")
@@ -250,14 +217,8 @@ def recommend_endpoint():
         if not product_id:
             return jsonify({"error": "product_id is required"}), 400
 
-        results = recommend(
+        results = recommend_similar_products(
             product_id=product_id,
-            item_sim_df=item_sim_df,
-            model=model,
-            user_item=user_item,
-            product_popularity=product_popularity,
-            product_avg_price=product_avg_price,
-            df=df,
             order_id=order_id,
             top_k=top_k
         )
@@ -268,7 +229,6 @@ def recommend_endpoint():
         return jsonify({"error": str(e)}), 500
 
 
-# Run the app
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
