@@ -23,7 +23,7 @@ USER_ITEM_PATH = "user_item.pkl"
 # =============================================
 # 1. Load Data
 # =============================================
-print("🚀 Loading data...")
+print(" Loading data...")
 file_path = "data.xlsx"
 df = pd.read_excel(file_path, sheet_name='Sheet1')
 df['order_id'] = df['order_id'].astype(int)
@@ -76,7 +76,7 @@ def create_rank_features(df, user_item_matrix):
                 'user_activity': user_item_matrix.loc[order_id].sum()
             })
 
-        # Negative samples (قللنا لـ 2x عشان السرعة)
+       
         not_bought = user_item_matrix.loc[order_id][user_item_matrix.loc[order_id] == 0].index
         sample_size = min(2 * len(bought_items), len(not_bought))
         if sample_size > 0:
@@ -201,7 +201,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return jsonify({"message": "Recommendation API is running 🚀"})
+    return jsonify({"message": "Recommendation API is running !!!!!!"})
 
 @app.route("/recommend", methods=["POST"])
 def recommend_endpoint():
