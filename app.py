@@ -189,7 +189,6 @@ def recommend_similar_products(product_id, order_id=None, top_k=5, min_similarit
         result.append({
             "product_id": item_id,
             "product_name": product_name,
-            "ranking_score": round(float(score), 4)
         })
 
     return result
